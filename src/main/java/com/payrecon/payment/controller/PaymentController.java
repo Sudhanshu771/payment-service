@@ -1,6 +1,7 @@
 package com.payrecon.payment.controller;
 
 import com.payrecon.payment.dto.CreatePaymentRequest;
+import com.payrecon.payment.dto.CreatePaymentResult;
 import com.payrecon.payment.dto.PaymentResponse;
 import com.payrecon.payment.service.PaymentService;
 import jakarta.validation.Valid;
@@ -20,18 +21,29 @@ public class PaymentController {
         this.paymentService = paymentService;
     }
 
-//    Postman JSON → Controller → Service → Repository → Hibernate INSERT → Postgres
-    //                                                                         │
-//    Postman  ←  201 + receipt JSON  ←  PaymentResponse.from(saved)  ←────────┘
+    // Postman (key + JSON) → Controller → Service → Redis check → Postgres
+    //   new key  → 201 Created + receipt
+    //   same key → 200 OK + the SAME receipt (no new payment)
     @PostMapping
-    public ResponseEntity<PaymentResponse> create(@Valid @RequestBody CreatePaymentRequest request){
-        PaymentResponse created = paymentService.create(request);
-        return ResponseEntity.created(URI.create("api/v1/payments"+created.paymentId())).body(created);
+    public ResponseEntity<PaymentResponse> create(
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody CreatePaymentRequest request) {
+
+        CreatePaymentResult result = paymentService.create(idempotencyKey, request);
+
+        if (result.replayed()) {
+            return ResponseEntity.ok()                               // 200: retry
+                    .header("Idempotent-Replayed", "true")
+                    .body(result.payment());
+        }
+        return ResponseEntity
+                .created(URI.create("/api/v1/payments/" + result.payment().paymentId()))  // 201: new
+                .header("Idempotent-Replayed", "false")
+                .body(result.payment());
     }
 
     @GetMapping("/{id}")
     public PaymentResponse get(@PathVariable UUID id){
         return paymentService.get(id);
     }
-
 }

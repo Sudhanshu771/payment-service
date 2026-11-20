@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -64,6 +65,15 @@ public class GlobalExceptionHandler {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(
                 HttpStatus.INTERNAL_SERVER_ERROR, "Something went wrong. Please try again later.");
         pd.setTitle("Internal error");
+        return pd;
+    }
+
+    // Required header missing (e.g. no Idempotency-Key) → 400
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    public ProblemDetail handleMissingHeader(MissingRequestHeaderException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(
+                HttpStatus.BAD_REQUEST, "Header '" + ex.getHeaderName() + "' is required");
+        pd.setTitle("Missing header");
         return pd;
     }
 }
