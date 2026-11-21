@@ -10,8 +10,9 @@ import java.util.UUID;
 public class IdempotencyStore {
 
     public static final String IN_PROGRESS = "IN_PROGRESS";
-    private static final String PREFIX = "idem:";               // keys look like idem:abc-123
-    private static final Duration TTL = Duration.ofHours(24);   // forget keys after 24 hours
+    private static final String PREFIX = "idem:";
+    private static final String SEPARATOR = "|";
+    private static final Duration TTL = Duration.ofHours(24);
 
     private final StringRedisTemplate redis;
 
@@ -19,24 +20,39 @@ public class IdempotencyStore {
         this.redis = redis;
     }
 
-    // SET NX: returns true only for the FIRST request with this key
-    public boolean claim(String key) {
-        return Boolean.TRUE.equals(
-                redis.opsForValue().setIfAbsent(PREFIX + key, IN_PROGRESS, TTL));
+    // What lookup() gives back: the saved hash + the state (IN_PROGRESS or a payment id)
+    public record Entry(String requestHash, String state) {
+        public boolean inProgress() {
+            return IN_PROGRESS.equals(state);
+        }
     }
 
-    // Payment saved: replace "IN_PROGRESS" with the real payment id
-    public void complete(String key, UUID paymentId) {
-        redis.opsForValue().set(PREFIX + key, paymentId.toString(), TTL);
+    // SET NX: store "hash|IN_PROGRESS" only if the key is new
+    public boolean claim(String key, String requestHash) {
+        return Boolean.TRUE.equals(redis.opsForValue()
+                .setIfAbsent(PREFIX + key, requestHash + SEPARATOR + IN_PROGRESS, TTL));
     }
 
-    // Something failed: remove the key so the client can try again
+    // Payment saved: store "hash|paymentId"
+    public void complete(String key, String requestHash, UUID paymentId) {
+        redis.opsForValue().set(PREFIX + key, requestHash + SEPARATOR + paymentId, TTL);
+    }
+
+    // Something failed: delete the key so the client can retry
     public void release(String key) {
         redis.delete(PREFIX + key);
     }
 
-    // What's stored for this key: null, "IN_PROGRESS", or a payment id
-    public String lookup(String key) {
-        return redis.opsForValue().get(PREFIX + key);
+    // Read "hash|state" and split it into its two parts
+    public Entry lookup(String key) {
+        String value = redis.opsForValue().get(PREFIX + key);
+        if (value == null) {
+            return null;
+        }
+        String[] parts = value.split("\\|", 2);    // split at the first "|"
+        if (parts.length < 2) {
+            return new Entry("", value);           // old 3a-style value without a hash
+        }
+        return new Entry(parts[0], parts[1]);
     }
 }

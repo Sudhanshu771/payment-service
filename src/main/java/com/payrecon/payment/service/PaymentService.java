@@ -4,6 +4,7 @@ import com.payrecon.payment.dto.CreatePaymentRequest;
 import com.payrecon.payment.dto.CreatePaymentResult;
 import com.payrecon.payment.dto.PaymentResponse;
 import com.payrecon.payment.idempotency.IdempotencyStore;
+import com.payrecon.payment.idempotency.RequestHasher;
 import com.payrecon.payment.model.Payment;
 import com.payrecon.payment.repository.PaymentRepository;
 import org.springframework.http.HttpStatus;
@@ -16,21 +17,21 @@ import java.util.UUID;
 @Service
 public class PaymentService {
     private final PaymentRepository paymentRepository;
-    private final IdempotencyStore idempotencyStore;          // NEW: the token register (Redis)
+    private final IdempotencyStore idempotencyStore;
 
     public PaymentService(PaymentRepository paymentRepository,
-                          IdempotencyStore idempotencyStore) { // NEW: Spring injects both
+                          IdempotencyStore idempotencyStore) {
         this.paymentRepository = paymentRepository;
         this.idempotencyStore = idempotencyStore;
     }
 
-    // No @Transactional here: save() commits on its own,
-    // so we write to Redis only AFTER the payment is safely in Postgres
     public CreatePaymentResult create(String idempotencyKey, CreatePaymentRequest req) {
 
-        // 1. Seen this key before? → it's a retry → return the old result
-        if (!idempotencyStore.claim(idempotencyKey)) {
-            return replay(idempotencyKey);
+        String requestHash = RequestHasher.hash(req);                    // NEW: fingerprint of the slip
+
+        // 1. Seen this key before? → check it in replay()
+        if (!idempotencyStore.claim(idempotencyKey, requestHash)) {      // NEW: pass the hash
+            return replay(idempotencyKey, requestHash);                  // NEW: pass the hash
         }
 
         // 2. New key → create the payment
@@ -39,29 +40,40 @@ public class PaymentService {
                     req.payerAccount(), req.payeeAccount(), req.reference());
             Payment saved = paymentRepository.save(payment);
 
-            // 3. Remember which payment this key created
-            idempotencyStore.complete(idempotencyKey, saved.getId());
+            // 3. Remember: this key + this hash → this payment
+            idempotencyStore.complete(idempotencyKey, requestHash, saved.getId());   // NEW: pass the hash
             return new CreatePaymentResult(PaymentResponse.from(saved), false);
 
         } catch (RuntimeException e) {
-            // Saving failed → free the key so the client can retry
             idempotencyStore.release(idempotencyKey);
             throw e;
         }
     }
 
-    private CreatePaymentResult replay(String idempotencyKey) {
-        String stored = idempotencyStore.lookup(idempotencyKey);
+    private CreatePaymentResult replay(String idempotencyKey, String requestHash) {
+        IdempotencyStore.Entry stored = idempotencyStore.lookup(idempotencyKey);   // NEW: an Entry, not text
 
-        // First request is still running → ask the client to retry shortly
-        if (stored == null || IdempotencyStore.IN_PROGRESS.equals(stored)) {
+        // Key vanished (expired) between our two Redis calls → ask to retry
+        if (stored == null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "A request with this Idempotency-Key is still being processed. Retry shortly.");
         }
 
-        // Finished earlier → return the SAME payment, don't create a new one
-        Payment existing = paymentRepository.findById(UUID.fromString(stored))
-                .orElseThrow(() -> new IllegalStateException("Stored payment not found: " + stored));
+        // NEW: same key, DIFFERENT payment details → client mistake → 409
+        if (!stored.requestHash().equals(requestHash)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "This Idempotency-Key was already used for a different payment. Use a new key.");
+        }
+
+        // Same details, but the first request hasn't finished yet → 409
+        if (stored.inProgress()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "A request with this Idempotency-Key is still being processed. Retry shortly.");
+        }
+
+        // Same details, finished → return the SAME payment (200)
+        Payment existing = paymentRepository.findById(UUID.fromString(stored.state()))
+                .orElseThrow(() -> new IllegalStateException("Stored payment not found: " + stored.state()));
         return new CreatePaymentResult(PaymentResponse.from(existing), true);
     }
 
