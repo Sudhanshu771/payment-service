@@ -16,10 +16,5 @@ public class PaymentEventListener {
     public void onPaymentCreated(PaymentCreatedEvent event) {
         log.info("RECEIVED payment {} amount {} {} ref {}",
                 event.paymentId(), event.amount(), event.currency(), event.reference());
-
-        // TEMPORARY: fake a failure so we can watch retries
-        if (event.reference().startsWith("FAIL")) {
-            throw new IllegalStateException("Simulated failure for " + event.reference());
-        }
     }
 }

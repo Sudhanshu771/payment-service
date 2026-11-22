@@ -2,84 +2,83 @@ package com.payrecon.payment.exception;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.QueryTimeoutException;                          // NEW
-import org.springframework.data.redis.RedisConnectionFailureException;         // NEW
+import org.springframework.beans.TypeMismatchException;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.data.redis.RedisConnectionFailureException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
-import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
-import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
-import org.springframework.web.server.ResponseStatusException;
-import org.springframework.web.servlet.resource.NoResourceFoundException;       // NEW
+import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+// Every error → a clean ProblemDetail JSON.
+//
+// We EXTEND ResponseEntityExceptionHandler: Spring then handles ~20 standard errors itself with the
+// right status (405 wrong method, 415 wrong body type, 400 missing header, 404 unknown URL, our own
+// ResponseStatusException 404/409 ...). Before, our catch-all turned some of those into 500.
+//
+// For the standard errors where we want OUR wording, we OVERRIDE Spring's method (not @ExceptionHandler,
+// which would clash with Spring's own handler for the same exception).
 @RestControllerAdvice
-public class GlobalExceptionHandler {
+public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
-    // 1. A @Valid rule failed (e.g. negative amount) → 400
-    @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
+    // A @Valid rule failed (e.g. negative amount) → 400 with one message per field
+    @Override
+    protected ResponseEntity<Object> handleMethodArgumentNotValid(
+            MethodArgumentNotValidException ex, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
         Map<String, String> errors = new LinkedHashMap<>();
         ex.getBindingResult().getFieldErrors()
                 .forEach(fe -> errors.putIfAbsent(fe.getField(), fe.getDefaultMessage()));
 
-        ProblemDetail pd = ProblemDetail.forStatusAndDetail(
-                HttpStatus.BAD_REQUEST, "One or more fields are invalid");
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "One or more fields are invalid");
         pd.setTitle("Validation failed");
         pd.setProperty("errors", errors);
-        return pd;
+        return ResponseEntity.badRequest().headers(headers).body(pd);
     }
 
-    // 2. The body isn't valid JSON, or a value has the wrong type ("amount": "abc") → 400
-    @ExceptionHandler(HttpMessageNotReadableException.class)
-    public ProblemDetail handleUnreadable(HttpMessageNotReadableException ex) {
+    // Body isn't valid JSON, or a value has the wrong type ("amount": "abc") → 400
+    @Override
+    protected ResponseEntity<Object> handleHttpMessageNotReadable(
+            HttpMessageNotReadableException ex, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(
                 HttpStatus.BAD_REQUEST, "Request body is missing or is not valid JSON");
         pd.setTitle("Malformed request");
-        return pd;
+        return ResponseEntity.badRequest().headers(headers).body(pd);
     }
 
-    // 3. Bad value in the URL (e.g. /payments/not-a-uuid) → 400
-    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
-    public ProblemDetail handleTypeMismatch(MethodArgumentTypeMismatchException ex) {
+    // Bad value in the URL (e.g. /payments/not-a-uuid or ?status=WRONG) → 400
+    @Override
+    protected ResponseEntity<Object> handleTypeMismatch(
+            TypeMismatchException ex, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+        String name = ex.getPropertyName() != null ? ex.getPropertyName() : "parameter";
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(
-                HttpStatus.BAD_REQUEST, "'" + ex.getValue() + "' is not a valid " + ex.getName());
+                HttpStatus.BAD_REQUEST, "'" + ex.getValue() + "' is not a valid " + name);
         pd.setTitle("Invalid parameter");
-        return pd;
+        return ResponseEntity.badRequest().headers(headers).body(pd);
     }
 
-    // 4. Required header missing (e.g. no Idempotency-Key) → 400
-    @ExceptionHandler(MissingRequestHeaderException.class)
-    public ProblemDetail handleMissingHeader(MissingRequestHeaderException ex) {
+    // Wrong username or password on /auth/login → 401 (never say WHICH one was wrong)
+    @ExceptionHandler(AuthenticationException.class)
+    public ProblemDetail handleLoginFailed(AuthenticationException ex) {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(
-                HttpStatus.BAD_REQUEST, "Header '" + ex.getHeaderName() + "' is required");
-        pd.setTitle("Missing header");
+                HttpStatus.UNAUTHORIZED, "Invalid username or password");
+        pd.setTitle("Login failed");
         return pd;
     }
 
-    // 5. NEW: unknown URL (e.g. /favicon.ico or a typo) → 404, not 500
-    @ExceptionHandler(NoResourceFoundException.class)
-    public ProblemDetail handleNotFound(NoResourceFoundException ex) {
-        ProblemDetail pd = ProblemDetail.forStatusAndDetail(
-                HttpStatus.NOT_FOUND, "No endpoint found for " + ex.getResourcePath());
-        pd.setTitle("Not found");
-        return pd;
-    }
-
-    // 6. Errors we throw on purpose: 404 "Payment not found", 409 idempotency conflicts
-    @ExceptionHandler(ResponseStatusException.class)
-    public ProblemDetail handleResponseStatus(ResponseStatusException ex) {
-        return ex.getBody();
-    }
-
-    // 7. NEW: Redis down or not answering → 503, temporary, the client should retry later
+    // Redis down or not answering → 503, temporary, the client should retry later
     @ExceptionHandler({RedisConnectionFailureException.class, QueryTimeoutException.class})
     public ProblemDetail handleRedisDown(Exception ex) {
         log.error("Redis unavailable", ex);
@@ -90,7 +89,7 @@ public class GlobalExceptionHandler {
         return pd;
     }
 
-    // 8. Anything unexpected: log the details, but never show them to the client → 500
+    // Anything unexpected: log the details, but never show them to the client → 500
     @ExceptionHandler(Exception.class)
     public ProblemDetail handleUnexpected(Exception ex) {
         log.error("Unexpected error", ex);

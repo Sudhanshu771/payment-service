@@ -2,7 +2,13 @@ package com.payrecon.payment.service;
 
 import com.payrecon.payment.dto.CreatePaymentRequest;
 import com.payrecon.payment.dto.CreatePaymentResult;
+import com.payrecon.payment.dto.PageResponse;
 import com.payrecon.payment.dto.PaymentResponse;
+import com.payrecon.payment.model.PaymentStatus;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import com.payrecon.payment.event.PaymentEventPublisher;
 import com.payrecon.payment.idempotency.IdempotencyStore;
 import com.payrecon.payment.idempotency.RequestHasher;
@@ -81,6 +87,20 @@ public class PaymentService {
         Payment existing = paymentRepository.findById(UUID.fromString(stored.state()))
                 .orElseThrow(() -> new IllegalStateException("Stored payment not found: " + stored.state()));
         return new CreatePaymentResult(PaymentResponse.from(existing), true);
+    }
+
+    // NEW: newest payments first, one page at a time, optionally only one status
+    @Transactional(readOnly = true)
+    public PageResponse<PaymentResponse> list(PaymentStatus status, int page, int size) {
+        int safeSize = Math.min(Math.max(size, 1), 100);          // never return 1,000,000 rows at once
+        Pageable pageable = PageRequest.of(Math.max(page, 0), safeSize,
+                Sort.by(Sort.Direction.DESC, "createdAt"));
+
+        Page<Payment> result = (status == null)
+                ? paymentRepository.findAll(pageable)
+                : paymentRepository.findByStatus(status, pageable);
+
+        return PageResponse.from(result, PaymentResponse::from);
     }
 
     @Transactional(readOnly = true)

@@ -67,6 +67,12 @@
 			<artifactId>spring-boot-starter-kafka</artifactId>
 		</dependency>
 
+		<!-- Login + JWT tokens: Spring Security as an OAuth2 "resource server" that checks JWTs -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
+		</dependency>
+
 	</dependencies>
 
 	<build>

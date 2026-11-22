@@ -2,7 +2,9 @@ package com.payrecon.payment.controller;
 
 import com.payrecon.payment.dto.CreatePaymentRequest;
 import com.payrecon.payment.dto.CreatePaymentResult;
+import com.payrecon.payment.dto.PageResponse;
 import com.payrecon.payment.dto.PaymentResponse;
+import com.payrecon.payment.model.PaymentStatus;
 import com.payrecon.payment.service.PaymentService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -40,6 +42,15 @@ public class PaymentController {
                 .created(URI.create("/api/v1/payments/" + result.payment().paymentId()))  // 201: new
                 .header("Idempotent-Replayed", "false")
                 .body(result.payment());
+    }
+
+    // NEW: GET /api/v1/payments?page=0&size=20&status=PENDING  (status is optional)
+    @GetMapping
+    public PageResponse<PaymentResponse> list(
+            @RequestParam(required = false) PaymentStatus status,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return paymentService.list(status, page, size);
     }
 
     @GetMapping("/{id}")
