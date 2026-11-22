@@ -139,6 +139,8 @@ Wrong username or password → **401** `"Invalid username or password"`
 ```
 The API runs at `http://localhost:8080`; the `payments` table is created on startup.
 
+> `mvnw` uses `JAVA_HOME`, which must point to **JDK 17+** (e.g. `$env:JAVA_HOME="C:\Program Files\Java\jdk-17"`). Running from IntelliJ uses the project SDK instead.
+
 ### Configuration (environment variables)
 | Variable | Purpose | Local default |
 |---|---|---|
