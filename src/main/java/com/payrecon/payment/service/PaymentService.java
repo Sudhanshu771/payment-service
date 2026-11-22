@@ -3,6 +3,7 @@ package com.payrecon.payment.service;
 import com.payrecon.payment.dto.CreatePaymentRequest;
 import com.payrecon.payment.dto.CreatePaymentResult;
 import com.payrecon.payment.dto.PaymentResponse;
+import com.payrecon.payment.event.PaymentEventPublisher;
 import com.payrecon.payment.idempotency.IdempotencyStore;
 import com.payrecon.payment.idempotency.RequestHasher;
 import com.payrecon.payment.model.Payment;
@@ -18,11 +19,15 @@ import java.util.UUID;
 public class PaymentService {
     private final PaymentRepository paymentRepository;
     private final IdempotencyStore idempotencyStore;
+    private final PaymentEventPublisher eventPublisher;
+
 
     public PaymentService(PaymentRepository paymentRepository,
-                          IdempotencyStore idempotencyStore) {
+                          IdempotencyStore idempotencyStore,
+                          PaymentEventPublisher eventPublisher) {
         this.paymentRepository = paymentRepository;
         this.idempotencyStore = idempotencyStore;
+        this.eventPublisher = eventPublisher;
     }
 
     public CreatePaymentResult create(String idempotencyKey, CreatePaymentRequest req) {
@@ -41,7 +46,8 @@ public class PaymentService {
             Payment saved = paymentRepository.save(payment);
 
             // 3. Remember: this key + this hash → this payment
-            idempotencyStore.complete(idempotencyKey, requestHash, saved.getId());   // NEW: pass the hash
+            idempotencyStore.complete(idempotencyKey, requestHash, saved.getId());
+            eventPublisher.publishCreated(saved);                     // NEW: ring the bell
             return new CreatePaymentResult(PaymentResponse.from(saved), false);
 
         } catch (RuntimeException e) {
